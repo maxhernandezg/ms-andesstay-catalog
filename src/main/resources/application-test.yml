@@ -1,0 +1,23 @@
+# Perfil test: H2 aislada y sin seeder. El JwtDecoder se reemplaza por un mock en los tests.
+spring:
+  datasource:
+    url: jdbc:h2:mem:andesstay-test;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+    show-sql: false
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://login.microsoftonline.com/tenant-de-prueba/v2.0
+
+andesstay:
+  security:
+    issuer-uri: https://login.microsoftonline.com/tenant-de-prueba/v2.0
+    api-client-id: api-client-de-prueba
+    required-scope: access_as_user
