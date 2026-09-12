@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Perfil "oracle" de ms-andesstay-catalog
+# Oracle Autonomous Database (ANDESSTAY, sa-santiago-1) con wallet mTLS.
+#
+# MODELO: un esquema por microservicio (database-per-service).
+#   Este servicio se conecta SIEMPRE con el usuario ANDESSTAY_CATALOG
+#   y es dueño de su tabla CATALOG_UNIT. No ve los esquemas de los demás.
+#
+# Variables de entorno obligatorias (NO hay defaults a propósito: si falta
+# alguna el servicio debe fallar al arrancar, no conectarse a un esquema ajeno):
+#   ORACLE_USER      -> ANDESSTAY_CATALOG
+#   ORACLE_PASSWORD  -> la clave de ese usuario (vive solo en infra/apps/.env)
+#   ORACLE_SERVICE   -> alias del tnsnames.ora, usar andesstay_low
+#   TNS_ADMIN        -> carpeta del wallet descomprimido
+#                       local:  infra/oracle/wallet/Wallet_Andesstay
+#                       docker: /app/wallet
+#
+# Ejemplo de arranque local:
+#   export TNS_ADMIN=$PWD/../infra/oracle/wallet/Wallet_Andesstay
+#   export ORACLE_SERVICE=andesstay_low
+#   export ORACLE_USER=ANDESSTAY_CATALOG ORACLE_PASSWORD='...'
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=oracle
+#
+# Los datos semilla son EXCLUSIVOS del perfil dev (DevDataSeeder es @Profile("dev")):
+# en oracle no se inserta nada, solo se crea/actualiza el esquema.
+# ---------------------------------------------------------------------------
+spring:
+  datasource:
+    # El wallet se resuelve por TNS_ADMIN; requiere oraclepki en el classpath
+    # para poder leer cwallet.sso (ya está declarado en el pom.xml).
+    url: jdbc:oracle:thin:@${ORACLE_SERVICE}?TNS_ADMIN=${TNS_ADMIN}
+    driver-class-name: oracle.jdbc.OracleDriver
+    username: ${ORACLE_USER}
+    password: ${ORACLE_PASSWORD}
+    hikari:
+      maximum-pool-size: ${ORACLE_POOL_MAX:2}   # la ADB permite 30 sesiones en total;
+                                              # 5 servicios x 2 = 10, dejando amplio margen para ADMIN y herramientas
+      minimum-idle: ${ORACLE_POOL_MIN:1}
+      connection-timeout: 30000
+      pool-name: catalog-oracle-pool
+  jpa:
+    database-platform: org.hibernate.dialect.OracleDialect
+    hibernate:
+      # update: Hibernate crea CATALOG_UNIT la primera vez y luego solo agrega
+      # columnas nuevas. Nunca borra datos (a diferencia de create-drop de dev).
+      ddl-auto: update
+    open-in-view: false
+    show-sql: false
+
+logging:
+  level:
+    # Sube a DEBUG si necesitas ver el DDL que Hibernate ejecuta contra la ADB.
+    org.hibernate.tool.hbm2ddl: INFO
