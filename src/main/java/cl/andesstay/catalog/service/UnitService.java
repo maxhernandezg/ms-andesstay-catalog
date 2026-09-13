@@ -6,19 +6,15 @@ import cl.andesstay.catalog.dto.UnitRequest;
 import cl.andesstay.catalog.exception.ConflictException;
 import cl.andesstay.catalog.exception.NotFoundException;
 import cl.andesstay.catalog.repository.UnitRepository;
-import java.time.Instant;
 import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Reglas de negocio del catalogo: CRUD de unidades y manejo de disponibilidad.
+ * Reglas de negocio del catalogo: CRUD de unidades y su disponibilidad.
  *
- * Decision de concurrencia: reserve/release usan una sentencia UPDATE condicional
- * (ver UnitRepository) en vez de leer-modificar-guardar. La condicion de stock viaja
- * en el WHERE, por lo que la propia base de datos serializa las reservas simultaneas
- * sobre la misma fila y no se necesita reintentar por OptimisticLockingFailureException.
- * La entidad igual lleva @Version para proteger las actualizaciones del CRUD (PUT).
+ * La disponibilidad se administra desde el propio CRUD (PUT, solo ADMIN). La entidad lleva
+ * @Version para que dos actualizaciones simultaneas sobre la misma unidad no se pisen.
  */
 @Service
 public class UnitService {
@@ -86,38 +82,6 @@ public class UnitService {
     public void delete(Long id) {
         Unit unit = findById(id);
         repository.delete(unit);
-    }
-
-    /**
-     * Descuenta cupos. Lanza ConflictException (409) si no hay disponibilidad suficiente.
-     */
-    @Transactional
-    public Unit reserve(Long id, int quantity) {
-        Unit unit = findById(id);
-        if (!Boolean.TRUE.equals(unit.getActive())) {
-            throw new ConflictException("La unidad " + unit.getCode() + " no esta activa");
-        }
-        int updated = repository.decrementStock(id, quantity, Instant.now());
-        if (updated == 0) {
-            throw new ConflictException("Sin disponibilidad para la unidad " + unit.getCode()
-                    + ": quedan " + unit.getAvailableStock() + " cupos");
-        }
-        return findById(id);
-    }
-
-    /**
-     * Devuelve cupos. Nunca deja availableStock por sobre totalStock.
-     */
-    @Transactional
-    public Unit release(Long id, int quantity) {
-        Unit unit = findById(id);
-        int updated = repository.incrementStock(id, quantity, Instant.now());
-        if (updated == 0) {
-            throw new ConflictException("No se pueden devolver " + quantity + " cupos a la unidad "
-                    + unit.getCode() + ": el stock total es " + unit.getTotalStock()
-                    + " y ya hay " + unit.getAvailableStock() + " disponibles");
-        }
-        return findById(id);
     }
 
     private void apply(Unit unit, UnitRequest request) {

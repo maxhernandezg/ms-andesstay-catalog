@@ -136,38 +136,6 @@ class UnitControllerSecurityTest {
     }
 
     @Test
-    @DisplayName("403 con ROLE_CLIENTE en POST /api/catalog/units/{id}/reserve")
-    void reserveWithClienteRoleReturns403() throws Exception {
-        mockMvc.perform(post("/api/catalog/units/" + unitId + "/reserve")
-                        .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_CLIENTE")))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"quantity\":1}"))
-                .andExpect(status().isForbidden());
-    }
-
-    @Test
-    @DisplayName("200 con ROLE_OPERADOR en POST /api/catalog/units/{id}/reserve")
-    void reserveWithOperadorRoleReturns200() throws Exception {
-        mockMvc.perform(post("/api/catalog/units/" + unitId + "/reserve")
-                        .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_OPERADOR")))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"quantity\":2}"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.availableStock").value(3));
-    }
-
-    @Test
-    @DisplayName("409 al reservar mas cupos de los disponibles")
-    void reserveWithoutStockReturns409() throws Exception {
-        mockMvc.perform(post("/api/catalog/units/" + unitId + "/reserve")
-                        .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"quantity\":9}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.status").value(409));
-    }
-
-    @Test
     @DisplayName("404 al pedir una unidad inexistente")
     void getMissingUnitReturns404() throws Exception {
         mockMvc.perform(get("/api/catalog/units/999999")

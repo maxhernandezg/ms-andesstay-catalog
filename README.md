@@ -26,8 +26,6 @@ La matriz de autorización es la del contrato y se aplica en `SecurityConfig`:
 | POST | `/api/catalog/units` | ADMIN |
 | PUT | `/api/catalog/units/{id}` | ADMIN |
 | DELETE | `/api/catalog/units/{id}` | ADMIN |
-| POST | `/api/catalog/units/{id}/reserve` body `{"quantity":1}` | ADMIN, OPERADOR |
-| POST | `/api/catalog/units/{id}/release` body `{"quantity":1}` | ADMIN, OPERADOR |
 
 Públicos (sin token): `/actuator/health`, `/actuator/info`, `/v3/api-docs/**`, `/swagger-ui/**`.
 
@@ -151,29 +149,20 @@ Idéntico en todos los componentes de AndesStay:
 - `403` → token válido pero sin el rol requerido.
 - `400` → payload inválido (`@Valid`), con el detalle campo por campo en `details`.
 - `404` → la unidad no existe.
-- `409` → sin disponibilidad, código duplicado o choque de concurrencia.
+- `409` → código duplicado o choque de concurrencia al editar.
 - `502` → no se pudo hablar con un servicio aguas abajo.
 
 ---
 
-## 5. Disponibilidad: cómo se evita el sobrecupo
+## 5. Disponibilidad
 
-`reserve` y `release` **no** hacen leer-modificar-guardar. Usan una sentencia `UPDATE`
-condicional (ver `UnitRepository.decrementStock` / `incrementStock`):
+En la EP1 la disponibilidad de cada unidad (`availableStock`) la administra `ADMIN` desde el CRUD:
+`PUT /api/catalog/units/{id}`. Ningún otro microservicio la modifica: `ms-andesstay-reservations`
+no llama al catálogo, así que confirmar una reserva no descuenta cupos. Esa regla del caso se
+retoma en la EP2 con mensajería.
 
-```sql
-update CATALOG_UNIT set AVAILABLE_STOCK = AVAILABLE_STOCK - :quantity
- where ID = :id and AVAILABLE_STOCK >= :quantity
-```
-
-La condición de stock viaja dentro del `WHERE`, así que es la propia base de datos la que
-serializa dos reservas simultáneas sobre la misma fila: una gana, la otra afecta 0 filas y
-recibe un `409`. Es más simple y más barato que reintentar por bloqueo optimista, y se
-comporta igual en H2 y en Oracle. La entidad `Unit` igual lleva `@Version`, que protege las
-actualizaciones del CRUD (`PUT /api/catalog/units/{id}`) frente a ediciones concurrentes.
-
-`release` usa la condición espejo (`AVAILABLE_STOCK + :quantity <= TOTAL_STOCK`), de modo
-que nunca se devuelven más cupos de los que la unidad tiene.
+La entidad `Unit` lleva `@Version`: si dos administradores editan la misma unidad a la vez, el
+segundo recibe un `409` en lugar de pisar el cambio del primero.
 
 ---
 
@@ -213,16 +202,6 @@ curl -i -X POST http://localhost:8082/api/catalog/units \
         "nightlyRate": 128000,
         "totalStock": 3
       }'
-
-# Descontar un cupo (ADMIN u OPERADOR)
-curl -s -X POST http://localhost:8082/api/catalog/units/1/reserve \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"quantity":1}' | jq
-
-# Devolver el cupo
-curl -s -X POST http://localhost:8082/api/catalog/units/1/release \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"quantity":1}' | jq
 ```
 
 Normalmente no le pegas directo: el SPA habla con el **BFF** (`http://localhost:8080`),
@@ -258,7 +237,7 @@ Tabla `CATALOG_UNIT`:
 src/main/java/cl/andesstay/catalog/
 ├── config/      OpenApiConfig, DevDataSeeder
 ├── domain/      Unit, UnitType
-├── dto/         UnitRequest, UnitResponse, QuantityRequest, ApiError
+├── dto/         UnitRequest, UnitResponse, ApiError
 ├── exception/   NotFoundException, ConflictException
 ├── repository/  UnitRepository
 ├── security/    SecurityConfig, LazyJwtDecoder, AudienceValidator, ScopeValidator,

@@ -1,7 +1,6 @@
 package cl.andesstay.catalog.web;
 
 import cl.andesstay.catalog.domain.UnitType;
-import cl.andesstay.catalog.dto.QuantityRequest;
 import cl.andesstay.catalog.dto.UnitRequest;
 import cl.andesstay.catalog.dto.UnitResponse;
 import cl.andesstay.catalog.security.AuthenticatedUser;
@@ -78,23 +77,5 @@ public class UnitController {
         service.delete(id);
         log.info("Unidad id={} eliminada por {}", id, AuthenticatedUser.username());
         return ResponseEntity.noContent().build();
-    }
-
-    @PostMapping("/{id}/reserve")
-    @Operation(summary = "Descuenta cupos de una unidad (roles ADMIN, OPERADOR)")
-    public UnitResponse reserve(@PathVariable Long id, @Valid @RequestBody QuantityRequest request) {
-        UnitResponse unit = UnitResponse.from(service.reserve(id, request.quantity()));
-        log.info("Reservados {} cupos de la unidad {} por {}", request.quantity(), unit.code(),
-                AuthenticatedUser.username());
-        return unit;
-    }
-
-    @PostMapping("/{id}/release")
-    @Operation(summary = "Devuelve cupos a una unidad (roles ADMIN, OPERADOR)")
-    public UnitResponse release(@PathVariable Long id, @Valid @RequestBody QuantityRequest request) {
-        UnitResponse unit = UnitResponse.from(service.release(id, request.quantity()));
-        log.info("Liberados {} cupos de la unidad {} por {}", request.quantity(), unit.code(),
-                AuthenticatedUser.username());
-        return unit;
     }
 }

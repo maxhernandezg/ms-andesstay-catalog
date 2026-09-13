@@ -20,7 +20,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 
 /**
- * Pruebas de las reglas de disponibilidad contra H2 (sin red, sin Azure).
+ * Pruebas del servicio de unidades contra H2 (sin red, sin Azure).
  */
 @DataJpaTest
 @Import(UnitService.class)
@@ -41,46 +41,6 @@ class UnitServiceTest {
         Unit unit = repository.save(new Unit("UN-SRV-001", "Cabana Cochamo", UnitType.CABANA,
                 "Refugio Cochamo", "Cochamo, Los Lagos", 4, new BigDecimal("125000"), 5, 3, Boolean.TRUE));
         this.unitId = unit.getId();
-    }
-
-    @Test
-    @DisplayName("reserve por debajo del stock descuenta los cupos")
-    void reserveBelowStockDecrementsAvailability() {
-        Unit updated = service.reserve(unitId, 2);
-
-        assertThat(updated.getAvailableStock()).isEqualTo(1);
-        assertThat(updated.getTotalStock()).isEqualTo(5);
-    }
-
-    @Test
-    @DisplayName("reserve sin stock suficiente lanza ConflictException")
-    void reserveWithoutStockThrowsConflict() {
-        assertThatThrownBy(() -> service.reserve(unitId, 4))
-                .isInstanceOf(ConflictException.class)
-                .hasMessageContaining("Sin disponibilidad para la unidad UN-SRV-001")
-                .hasMessageContaining("quedan 3 cupos");
-
-        assertThat(repository.findById(unitId).orElseThrow().getAvailableStock()).isEqualTo(3);
-    }
-
-    @Test
-    @DisplayName("release devuelve cupos sin superar el stock total")
-    void releaseDoesNotExceedTotalStock() {
-        Unit updated = service.release(unitId, 2);
-        assertThat(updated.getAvailableStock()).isEqualTo(5);
-
-        assertThatThrownBy(() -> service.release(unitId, 1))
-                .isInstanceOf(ConflictException.class)
-                .hasMessageContaining("el stock total es 5");
-
-        assertThat(repository.findById(unitId).orElseThrow().getAvailableStock()).isEqualTo(5);
-    }
-
-    @Test
-    @DisplayName("reserve sobre una unidad inexistente lanza NotFoundException")
-    void reserveOnMissingUnitThrowsNotFound() {
-        assertThatThrownBy(() -> service.reserve(999999L, 1))
-                .isInstanceOf(NotFoundException.class);
     }
 
     @Test

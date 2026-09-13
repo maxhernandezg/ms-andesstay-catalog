@@ -67,8 +67,6 @@ public class SecurityConfig {
                         // Matriz de roles del contrato para /api/catalog
                         .requestMatchers(HttpMethod.GET, "/api/catalog/units", "/api/catalog/units/*")
                         .hasAnyRole(ADMIN, OPERADOR, CLIENTE)
-                        .requestMatchers(HttpMethod.POST, "/api/catalog/units/*/reserve", "/api/catalog/units/*/release")
-                        .hasAnyRole(ADMIN, OPERADOR)
                         .requestMatchers(HttpMethod.POST, "/api/catalog/units").hasRole(ADMIN)
                         .requestMatchers(HttpMethod.PUT, "/api/catalog/units/*").hasRole(ADMIN)
                         .requestMatchers(HttpMethod.DELETE, "/api/catalog/units/*").hasRole(ADMIN)
