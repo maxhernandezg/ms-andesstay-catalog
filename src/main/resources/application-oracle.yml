@@ -37,6 +37,21 @@ spring:
                                               # 5 servicios x 2 = 10, dejando amplio margen para ADMIN y herramientas
       minimum-idle: ${ORACLE_POOL_MIN:1}
       connection-timeout: 30000
+      # Conexiones muertas sin aviso: si el equipo que corre Docker se suspende (o la red corta
+      # el TCP), las conexiones a la ADB mueren sin que el driver lo sepa, y Hikari solo lo nota
+      # al validarlas. Sin este ajuste, la primera petición tras despertar esperaba 5 s por cada
+      # conexión muerta.
+      #   keepalive-time     : 30 s, el mínimo que acepta Hikari. Revisa en segundo plano las
+      #                        conexiones ociosas y reemplaza las muertas antes de que las use un usuario.
+      #   validation-timeout : 3 s. Si igual se topa con una conexión muerta, espera menos.
+      #   max-lifetime       : 10 min. Renueva cada conexión, muy por debajo del max_idle_time
+      #                        de 60 min de la ADB.
+      #   idle-timeout       : 5 min. Libera la segunda conexión si no se usa. Tiene que quedar
+      #                        bajo max-lifetime: si no, Hikari lo desactiva y avisa en cada arranque.
+      keepalive-time: ${ORACLE_POOL_KEEPALIVE_MS:30000}
+      validation-timeout: ${ORACLE_POOL_VALIDATION_MS:3000}
+      max-lifetime: ${ORACLE_POOL_MAX_LIFETIME_MS:600000}
+      idle-timeout: ${ORACLE_POOL_IDLE_TIMEOUT_MS:300000}
       pool-name: catalog-oracle-pool
   jpa:
     database-platform: org.hibernate.dialect.OracleDialect
