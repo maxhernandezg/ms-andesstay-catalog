@@ -1,4 +1,8 @@
 # Perfil test: H2 aislada y sin seeder. El JwtDecoder se reemplaza por un mock en los tests.
+# Mensajeria: el consumidor NO arranca (andesstay.rabbit.enabled=false) y el indicador de
+# salud de RabbitMQ se apaga, asi nada intenta hablar con el broker y /actuator/health
+# responde 200 sin broker. Las pruebas del consumidor lo invocan directo con un Channel
+# mockeado, que es lo que pide la EP3.
 spring:
   datasource:
     url: jdbc:h2:mem:andesstay-test;DB_CLOSE_DELAY=-1
@@ -21,3 +25,10 @@ andesstay:
     issuer-uri: https://login.microsoftonline.com/tenant-de-prueba/v2.0
     api-client-id: api-client-de-prueba
     required-scope: access_as_user
+  rabbit:
+    enabled: false
+
+management:
+  health:
+    rabbit:
+      enabled: false

@@ -26,7 +26,10 @@ ENV SPRING_PROFILES_ACTIVE=dev \
 
 EXPOSE 8082
 
+# El healthcheck usa el grupo publico /actuator/health/liveness, que NO incluye el
+# indicador de RabbitMQ: si el broker se cae, el catalogo sigue atendiendo su CRUD y
+# Docker no tiene por que reiniciarlo (los eventos esperan en q.evt.catalog).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD wget -q -O - http://localhost:8082/actuator/health | grep -q '"status":"UP"' || exit 1
+  CMD wget -q -O - http://localhost:8082/actuator/health/liveness | grep -q '"status":"UP"' || exit 1
 
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
