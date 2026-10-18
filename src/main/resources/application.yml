@@ -17,6 +17,29 @@ spring:
           # Issuer de Azure AD (Entra ID). Se resuelve de forma perezosa: ver LazyJwtDecoder.
           issuer-uri: https://login.microsoftonline.com/${AZURE_TENANT_ID:6f522bef-27e2-4548-89e6-c1717b61ae20}/v2.0
 
+  # Conexion AMQP al broker (puerto 5672). Conviven dos juegos de nombres a proposito:
+  # el stack de Compose y run-local.sh exportan SPRING_RABBITMQ_* (que Spring Boot lee
+  # solo y PISA este archivo), y el contrato del equipo usa RABBITMQ_*. Los defaults de
+  # aca son los de desarrollo local.
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:andesstay}
+    password: ${RABBITMQ_PASSWORD:andesstay}
+    virtual-host: ${RABBITMQ_VHOST:/}
+    connection-timeout: 3s
+    listener:
+      simple:
+        # ACK MANUAL: lo exige el contrato de la EP3. El listener decide mensaje a
+        # mensaje si hace basicAck, basicNack hacia la DLQ o republica un reintento.
+        # Esta aca (y no como atributo de @RabbitListener) para que la politica de
+        # entrega sea configuracion, no codigo.
+        acknowledge-mode: manual
+        # Un mensaje a la vez por consumidor: cada evento mueve el stock de una unidad
+        # y no queremos acumular entregas sin confirmar si la base se pone lenta.
+        prefetch: 1
+        concurrency: 1
+
 # Parametros propios de validacion del token (los consume AzureAdProperties).
 andesstay:
   security:
@@ -24,7 +47,58 @@ andesstay:
     api-client-id: ${AZURE_API_CLIENT_ID:7d348e57-2f83-4648-baf0-588cbacccc3c}
     required-scope: access_as_user
 
+  # --------------------------------------------------------------------------
+  #  CONTRATO DE MENSAJERIA DE LA EP3 (configuracion centralizada)
+  #
+  #  Aca viven TODOS los nombres de exchange, cola y routing key que usa este
+  #  servicio. Se leen con la clase @ConfigurationProperties
+  #  AndesStayRabbitProperties y con ellos se arman los beans de
+  #  RabbitTopologyConfig, el @RabbitListener y hasta la decision de
+  #  "este evento descuenta o libera" de UnitAvailabilityService.
+  #  Ninguna clase Java escribe un nombre a mano: cambiar uno aca lo cambia en
+  #  todo el servicio.
+  #
+  #  Este servicio declara SOLO su parte del contrato (events.topic,
+  #  q.evt.catalog, events.dead.dlx y q.evt.catalog.dlq). q.evt.report es de
+  #  ms-andesstay-report, q.evt.audit de ms-andesstay-audit y las colas de
+  #  comandos de ms-andesstay-notify.
+  # --------------------------------------------------------------------------
+  rabbit:
+    # Interruptor de la mensajeria: si es false el @RabbitListener no arranca y el
+    # catalogo funciona igual (el CRUD REST no depende del broker).
+    # run-local.sh pone ANDESSTAY_RABBIT_ENABLED=false cuando no detecta broker.
+    enabled: ${ANDESSTAY_RABBIT_ENABLED:true}
+    # Intentos antes de mandar un mensaje a la DLQ (header x-attempt). Mismo numero
+    # que publica rabbit-admin en /api/rabbit/topology: el contrato es uno solo.
+    max-attempts: ${RABBITMQ_MAX_ATTEMPTS:3}
+    # Header del contrato que lleva el numero de intento (1 la primera vez).
+    attempt-header: x-attempt
+
+    exchanges:
+      events-topic: events.topic      # pub/sub de eventos de dominio
+      events-dlx: events.dead.dlx     # dead-letter de las colas de eventos
+
+    queues:
+      catalog: q.evt.catalog          # la cola que consume ESTE servicio
+      catalog-dlq: q.evt.catalog.dlq  # su cola de descarte
+
+    # Las dos claves EXACTAS a las que esta atada q.evt.catalog (no el patron
+    # reservation.# de reporteria y auditoria: al catalogo solo le incumben los
+    # eventos que mueven stock) y la routing key de descarte.
+    routing-keys:
+      reservation-confirmed: reservation.confirmed   # descuenta un cupo
+      reservation-cancelled: reservation.cancelled   # devuelve un cupo
+      catalog-dead: catalog.dead                     # binding de la DLQ con events.dead.dlx
+
 management:
+  health:
+    # El indicador de RabbitMQ sigue al MISMO interruptor que el consumidor: si este
+    # servicio corre a proposito sin mensajeria (run-local.sh cuando no detecta broker),
+    # informar DOWN por un broker que no vamos a usar es mentira, y ademas dejaria
+    # /actuator/health en 503, que es justo lo que run-local.sh consulta para decidir si
+    # el servicio arranco.
+    rabbit:
+      enabled: ${ANDESSTAY_RABBIT_ENABLED:true}
   endpoints:
     web:
       exposure:
@@ -34,6 +108,13 @@ management:
       probes:
         enabled: true
       show-details: never
+      # Grupo 'liveness' SIN el indicador de RabbitMQ: lo usa el healthcheck del
+      # contenedor. Con /actuator/health (que desde la EP3 si mira el broker),
+      # Docker mataria este servicio cada vez que el broker se cayera, y el
+      # catalogo se puede seguir consultando y editando sin mensajeria.
+      group:
+        liveness:
+          include: ping
   info:
     env:
       enabled: true

@@ -43,6 +43,12 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
     </dependency>
+    <!-- Mensajeria de la EP3: este servicio CONSUME la cola q.evt.catalog para
+         descontar y liberar la disponibilidad de las unidades. No publica nada. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-amqp</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>org.springdoc</groupId>

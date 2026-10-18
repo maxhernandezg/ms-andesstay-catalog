@@ -1,15 +1,17 @@
 # ms-andesstay-catalog
 
 Microservicio de **catálogo de unidades y disponibilidad** de AndesStay
-(asignatura DSY1107 — Desarrollo Cloud Native I, Evaluación Parcial N°1).
+(asignatura DSY1107 — Desarrollo Cloud Native I).
 
 Acá vive el inventario de la red: habitaciones, cabañas y lodges de los 20 recintos,
-con su tarifa por noche, capacidad, stock total y stock disponible. También expone las
-operaciones de `reserve` / `release` que usa `ms-andesstay-reservations` cuando una
-reserva se confirma o se cancela.
+con su tarifa por noche, capacidad, stock total y stock disponible. Desde la EP3 también
+**descuenta la disponibilidad cuando una reserva se confirma y la libera cuando se cancela**,
+escuchando los eventos de RabbitMQ: `ms-andesstay-reservations` no llama a este servicio
+(ver [§5](#5-disponibilidad-y-mensajería-ep3)).
 
 - **Puerto:** `8082`
 - **Base del API:** `/api/catalog/units`
+- **Cola que consume:** `q.evt.catalog` (`reservation.confirmed` y `reservation.cancelled`)
 - **Java 21 + Spring Boot 3.5.16** (resource server OAuth2 contra Azure AD / Entra ID)
 - **Base de datos:** H2 en memoria (perfil `dev`) u Oracle Autonomous Database (perfil `oracle`)
 
@@ -76,12 +78,19 @@ docker build -t andesstay/ms-catalog:1.0.0 .
 docker run --rm -p 8082:8082 \
   -e AZURE_TENANT_ID=6f522bef-27e2-4548-89e6-c1717b61ae20 \
   -e AZURE_API_CLIENT_ID=7d348e57-2f83-4648-baf0-588cbacccc3c \
+  -e ANDESSTAY_RABBIT_ENABLED=false \
   andesstay/ms-catalog:1.0.0
 ```
 
+Sin broker a la vista conviene partir con `ANDESSTAY_RABBIT_ENABLED=false`: el CRUD queda
+igual y no se llena el log de reintentos de conexión. Con el stack de `infra/apps` esa variable
+no va, porque ahí sí hay broker (`rabbit1`).
+
 La imagen es multi-stage (build con `maven:3.9-eclipse-temurin-21`, runtime con
 `eclipse-temurin:21-jre-alpine`), corre con el usuario no root `andesstay` y trae
-`HEALTHCHECK` contra `/actuator/health`.
+`HEALTHCHECK` contra `/actuator/health/liveness`. Es el grupo que **no** incluye el indicador de
+RabbitMQ: si el broker se cae, el catálogo sigue atendiendo su CRUD y Docker no tiene por qué
+reiniciarlo (los eventos esperan en la cola).
 
 ---
 
@@ -96,6 +105,14 @@ La imagen es multi-stage (build con `maven:3.9-eclipse-temurin-21`, runtime con
 | `ORACLE_SERVICE` | `andesstay_high` | Alias TNS del wallet |
 | `TNS_ADMIN` | `./wallet` | Carpeta del wallet de Oracle ADB |
 | `ORACLE_USER` / `ORACLE_PASSWORD` | `ANDESSTAY` / `changeme` | Credenciales de la BD |
+| `RABBITMQ_HOST` / `RABBITMQ_PORT` | `localhost` / `5672` | Broker AMQP del contrato de la EP3 |
+| `RABBITMQ_USER` / `RABBITMQ_PASSWORD` | `andesstay` / `andesstay` | Credenciales del broker local |
+| `RABBITMQ_VHOST` | `/` | vhost del broker |
+| `RABBITMQ_MAX_ATTEMPTS` | `3` | Intentos antes de mandar un mensaje a la DLQ (header `x-attempt`) |
+| `ANDESSTAY_RABBIT_ENABLED` | `true` | En `false` el `@RabbitListener` no arranca **y se apaga el indicador de salud de RabbitMQ**: el catálogo funciona sin broker y `/actuator/health` sigue respondiendo `200` (es lo que hace `run-local.sh` cuando no detecta broker) |
+
+Dentro de Compose los nombres son `SPRING_RABBITMQ_HOST`, `_PORT`, `_USERNAME` y `_PASSWORD`,
+que Spring Boot lee solo y **pisan** los de arriba.
 
 Los valores de Azure quedan como **placeholders literales** a propósito: nadie tiene que
 inventar GUIDs para que el proyecto compile y arranque.
@@ -154,15 +171,90 @@ Idéntico en todos los componentes de AndesStay:
 
 ---
 
-## 5. Disponibilidad
+## 5. Disponibilidad y mensajería (EP3)
 
-En la EP1 la disponibilidad de cada unidad (`availableStock`) la administra `ADMIN` desde el CRUD:
-`PUT /api/catalog/units/{id}`. Ningún otro microservicio la modifica: `ms-andesstay-reservations`
-no llama al catálogo, así que confirmar una reserva no descuenta cupos. Esa regla del caso se
-retoma en la EP2 con mensajería.
+La disponibilidad de cada unidad (`availableStock`) se mueve de **dos** formas:
 
-La entidad `Unit` lleva `@Version`: si dos administradores editan la misma unidad a la vez, el
-segundo recibe un `409` en lugar de pisar el cambio del primero.
+1. **A mano**, por `ADMIN`, desde el CRUD: `PUT /api/catalog/units/{id}`.
+2. **Por eventos**, al confirmarse o cancelarse una reserva. Esto es nuevo de la EP3 y es la
+   regla del caso que antes no estaba.
+
+### La cola que consume
+
+| Dato | Valor |
+|---|---|
+| Cola | `q.evt.catalog` (durable) |
+| Exchange | `events.topic` (topic, durable) |
+| Bindings | `reservation.confirmed` y `reservation.cancelled` (claves **exactas**, no `reservation.#`) |
+| Dead-letter | `events.dead.dlx` con routing key `catalog.dead` → `q.evt.catalog.dlq` |
+| ACK | **MANUAL** (`spring.rabbitmq.listener.simple.acknowledge-mode: manual`) |
+| Clase | `cl.andesstay.catalog.messaging.AvailabilityEventListener` |
+
+`ms-andesstay-reservations` **no llama a este servicio**: publica el hecho en `events.topic` y se
+desentiende. El mismo `reservation.confirmed` le llega a `q.evt.report`, a `q.evt.audit` y a
+`q.evt.catalog`, cada uno con su propia cola (pub/sub de verdad). Si el catálogo está caído
+cuando se confirma una reserva, el evento espera en la cola en vez de hacer fallar la
+confirmación; y si el broker está caído, el CRUD del catálogo sigue funcionando igual
+(`andesstay.rabbit.enabled=false` deja el consumidor sin arrancar).
+
+Los bindings son las dos claves exactas y no el comodín `reservation.#` porque al catálogo solo
+le incumben los eventos que mueven stock: con el patrón recibiría también `created`, `checkin` y
+`checkout`, que no cambian la disponibilidad.
+
+### Qué hace con cada evento
+
+| Evento | Efecto en la unidad del evento | Si no se puede |
+|---|---|---|
+| `reservation.confirmed` | `availableStock - 1` | la unidad ya está en 0: log **ERROR** con el código de la reserva y el mensaje se va a `q.evt.catalog.dlq`. **El stock nunca queda negativo** |
+| `reservation.cancelled` | `availableStock + 1`, topado en `totalStock` | ya tenía todos sus cupos libres (reserva cancelada que nunca se confirmó): `ACK` con log **WARN**, no es un error |
+| cualquier otro `type` | ninguno | a la DLQ: esa cola no está atada a otros eventos, así que alguien se salió del contrato |
+
+### Política de ACK y errores
+
+Es el indicador más pesado de la pauta (16%) y está tal cual el contrato
+([`docs/14-contrato-mensajeria.md`](../docs/14-contrato-mensajeria.md)):
+
+| Situación | Qué hace |
+|---|---|
+| Éxito | `basicAck(deliveryTag, false)` + log INFO con el stock antes y después |
+| `eventId` repetido | `basicAck` **sin repetir el efecto** + log INFO |
+| Error NO recuperable (JSON inválido, envelope incompleto, unidad inexistente, sin cupos) | `basicNack(deliveryTag, false, false)` → DLQ, log ERROR con `eventId`, `traceId` y motivo |
+| Error RECUPERABLE (base caída, timeout) | republica el mensaje con `x-attempt + 1` hasta `andesstay.rabbit.max-attempts` (3) y, agotados, `basicNack` → DLQ |
+| No se puede republicar el reintento (broker en flow control, conexión de publicación caída) | `basicNack(deliveryTag, false, false)` → DLQ, log ERROR: el evento queda guardado y se reinyecta a mano |
+
+**Nunca**, en ningún camino, se usa `requeue=true`: devolver el mensaje a la cola no aumenta el
+contador, así que volvería a la cabeza con el mismo `x-attempt` y el consumidor giraría sobre él
+sin límite. El contador viaja en el header `x-attempt` del mensaje republicado, así sobrevive a un
+reinicio del consumidor y se puede ver en la Management UI.
+
+### Idempotencia
+
+RabbitMQ entrega *at least once*, y acá el efecto no es idempotente por naturaleza: aplicar dos
+veces un `reservation.confirmed` descontaría dos cupos por una sola reserva. Por eso el `eventId`
+del envelope se guarda en la tabla **`CATALOG_PROCESSED_EVENT`** (es su clave primaria) **en la
+misma transacción** que el cambio de stock: si el evento vuelve, el consumidor hace `ACK` y no
+repite nada. El DDL para Oracle está en
+[`infra/oracle/16-catalog-processed-event.sql`](../infra/oracle/16-catalog-processed-event.sql).
+
+### Concurrencia
+
+El descuento **no** es "leer la unidad, restar uno y guardar". Se hace con un `UPDATE` condicional
+(`UnitRepository.reserveOneIfAvailable` / `releaseOneIfNotFull`): la base evalúa la condición
+(`AVAILABLE_STOCK > 0` o `AVAILABLE_STOCK < TOTAL_STOCK`) y escribe en la **misma sentencia
+atómica**, así que el stock no puede quedar negativo ni pasarse del total por mucho que dos
+eventos de la misma unidad se procesen a la vez. La sentencia sube igual la columna `VERSION`, o
+sea que el `@Version` de la entidad sigue siendo la defensa del CRUD: si un `ADMIN` estaba
+editando esa unidad con un `PUT`, su commit choca con el bloqueo optimista y recibe el `409` de
+siempre en vez de pisar el movimiento de stock.
+
+### Configuración centralizada
+
+Ningún nombre de cola, exchange o routing key está escrito en el código: todos viven en
+`application.yml` bajo `andesstay.rabbit.*`, los lee `AndesStayRabbitProperties`
+(`@ConfigurationProperties`) y con ellos se arman los beans de `RabbitTopologyConfig`, la cola del
+`@RabbitListener` y hasta la decisión de "este evento descuenta o libera". Este servicio declara
+**solo lo suyo**: `events.topic`, `q.evt.catalog`, `events.dead.dlx` y `q.evt.catalog.dlq`.
+`q.evt.report`, `q.evt.audit` y las colas `q.cmd.*` son de sus propios dueños.
 
 ---
 
@@ -229,22 +321,45 @@ Tabla `CATALOG_UNIT`:
 | `createdAt` / `updatedAt` | Instant | |
 | `version` | Long | bloqueo optimista |
 
+Tabla `CATALOG_PROCESSED_EVENT` (EP3, bitácora de idempotencia del consumidor):
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `eventId` | String(40) | **PK**: el `eventId` del envelope (= `messageId` de AMQP) |
+| `eventType` | String(60) | `reservation.confirmed` o `reservation.cancelled` |
+| `reservationCode` | String(20) | reserva que movió el stock |
+| `unitId` | Long | unidad afectada |
+| `outcome` | String(20) | `RESERVED`, `RELEASED` o `RELEASE_SKIPPED` |
+| `processedAt` | Instant | cuándo lo procesó este servicio |
+
+Sin clave foránea hacia `CATALOG_UNIT` a propósito: la bitácora tiene que sobrevivir al borrado
+de una unidad, porque es la única explicación de por qué su stock se movió.
+
 ---
 
 ## 8. Estructura y pruebas
 
 ```
 src/main/java/cl/andesstay/catalog/
-├── config/      OpenApiConfig, DevDataSeeder
-├── domain/      Unit, UnitType
+├── config/      OpenApiConfig, DevDataSeeder,
+│                AndesStayRabbitProperties (nombres del contrato de mensajería),
+│                RabbitTopologyConfig (beans Queue/Exchange/Binding)
+├── domain/      Unit, UnitType, ProcessedEvent
 ├── dto/         UnitRequest, UnitResponse, ApiError
 ├── exception/   NotFoundException, ConflictException
-├── repository/  UnitRepository
+├── messaging/   AvailabilityEventListener (ACK manual), ReservationEventParser,
+│                ReservationEventEnvelope, ReservationEventPayload,
+│                NonRecoverableEventException, InvalidEventException
+├── repository/  UnitRepository, ProcessedEventRepository
 ├── security/    SecurityConfig, LazyJwtDecoder, AudienceValidator, ScopeValidator,
 │                AuthenticatedUser, handlers de 401 y 403, AzureAdProperties
-├── service/     UnitService
+├── service/     UnitService, UnitAvailabilityService, AvailabilityOutcome
 └── web/         UnitController, GlobalExceptionHandler, ApiErrorSupport
 ```
+
+La configuración de mensajería va en clases **aparte** de los servicios de dominio: el
+`@Configuration` declara la topología, el `@ConfigurationProperties` tiene los nombres y el
+`@RabbitListener` solo coordina el ACK. Ningún `@Service` conoce un nombre de cola.
 
 Los tests **no** requieren red ni un tenant real: el `JwtDecoder` se reemplaza por un mock
 (`@MockitoBean`) y los tokens se simulan con `spring-security-test`.
@@ -254,14 +369,21 @@ export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home
 ./mvnw -B clean verify
 ```
 
-Cubren: 401 sin token, 403 con `ROLE_CLIENTE` en `POST`, 201 con `ROLE_ADMIN`, 200 con
-`ROLE_CLIENTE` en `GET`, 400 con payload inválido, 404, 409 sin disponibilidad, y las reglas
-de `reserve` / `release` contra H2.
+Son **33 pruebas** y ninguna necesita red ni broker:
+
+| Clase | Qué cubre |
+|---|---|
+| `UnitControllerSecurityTest` (9) | 401 sin token, 403 con `ROLE_CLIENTE` en `POST`, 201 con `ROLE_ADMIN`, 200 con `ROLE_CLIENTE` en `GET`, 400 con payload inválido, 404 y `/actuator/health` público |
+| `UnitServiceTest` (3) | reglas del CRUD contra H2: `availableStock` por defecto, código duplicado y filtros |
+| `CatalogApplicationTests` (1) | el contexto arranca sin salir a Internet |
+| `RabbitTopologyConfigTest` (5) | la topología declarada es la del contrato, los nombres salen del `application.yml`, los bindings son las dos claves exactas, el ACK es MANUAL y **no** se declaran colas de otros servicios |
+| `UnitAvailabilityServiceTest` (7) | confirmar baja el stock, cancelar lo libera, el mismo `eventId` dos veces lo deja igual, sin cupos no queda negativo, cancelar una unidad full no se pasa de `totalStock`, unidad inexistente y `type` que no mueve stock |
+| `AvailabilityEventListenerTest` (8) | la política de ACK con el `Channel` de AMQP mockeado: `ack`, `nack` a la DLQ, reintento con `x-attempt + 1`, intentos agotados, republicación imposible (a la DLQ, nunca `requeue=true`) y evento repetido |
 
 ---
 
-## 9. Fuera de alcance (EP1)
+## 9. Fuera de alcance
 
-Sin RabbitMQ, Kafka ni Zookeeper. La mensajería asíncrona es materia de EP2/EP3; por ahora
-la comunicación entre servicios es REST y quien publica eventos es
-`ms-andesstay-reservations`.
+Kafka y Zookeeper: la reportería releíble es materia de la evaluación siguiente
+(ver `infra/kafka/README.md`). Este servicio **no publica** mensajes y no habla con ningún otro
+microservicio por REST: solo consume `q.evt.catalog`.
