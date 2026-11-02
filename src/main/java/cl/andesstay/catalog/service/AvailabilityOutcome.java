@@ -15,9 +15,14 @@ public enum AvailabilityOutcome {
     RELEASED,
 
     /**
+     * {@code reservation.cancelled} de una reserva que nunca se confirmó (CREADA → CANCELADA):
+     * nunca descontó cupo, así que no se devuelve ninguno.
+     */
+    NEVER_RESERVED,
+
+    /**
      * {@code reservation.cancelled} sobre una unidad que ya tenía todos sus cupos libres: no hay
-     * nada que devolver. Es el caso normal de una reserva cancelada que nunca se confirmó
-     * (CREADA → CANCELADA), así que se confirma el mensaje y se deja constancia en el log.
+     * nada que devolver, así que se confirma el mensaje y se deja constancia en el log.
      */
     RELEASE_SKIPPED,
 

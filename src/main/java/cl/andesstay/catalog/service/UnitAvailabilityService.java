@@ -34,7 +34,9 @@ import org.springframework.transaction.annotation.Transactional;
  *   <tr><td>{@code reservation.confirmed}</td><td>{@code availableStock - 1}</td>
  *       <td>sin cupo: log ERROR y a la DLQ, el stock NO queda negativo</td></tr>
  *   <tr><td>{@code reservation.cancelled}</td><td>{@code availableStock + 1}, topado en
- *       {@code totalStock}</td><td>ya estaba full: ACK con log WARN, no es un error</td></tr>
+ *       {@code totalStock}, sólo si la reserva había descontado cupo ({@code previousStatus}
+ *       distinto de {@code CREADA})</td><td>nunca se confirmó: ACK sin mover el stock; ya
+ *       estaba full: ACK con log WARN, no es un error</td></tr>
  * </table>
  *
  * <h2>Transacción</h2>
@@ -46,6 +48,9 @@ import org.springframework.transaction.annotation.Transactional;
 public class UnitAvailabilityService {
 
     private static final Logger log = LoggerFactory.getLogger(UnitAvailabilityService.class);
+
+    /** Estado de una reserva que todavía no descontó cupo (el descuento llega al confirmar). */
+    private static final String NOT_YET_CONFIRMED = "CREADA";
 
     private final UnitRepository units;
     private final ProcessedEventRepository processedEvents;
@@ -140,15 +145,25 @@ public class UnitAvailabilityService {
     /** {@code reservation.cancelled}: un cupo más, sin pasarse del stock total. */
     private AvailabilityOutcome release(Unit unit, ReservationEventPayload payload,
                                         int previousStock, Instant now) {
+        // Sólo descuenta cupo reservation.confirmed, así que una reserva cancelada sin haberse
+        // confirmado (CREADA → CANCELADA) no tiene nada que devolver. reservations publica
+        // reservation.cancelled igual en ese caso; si se liberara un cupo, la unidad quedaría con
+        // más disponibilidad que la real cada vez que otra reserva confirmada ya ocupa uno.
+        if (NOT_YET_CONFIRMED.equals(payload.previousStatus())) {
+            log.info("Cancelación de una reserva que nunca se confirmó: no se devuelve cupo · "
+                            + "unidad {} ({}) sigue con {} cupos · reserva={}", unit.getId(),
+                    unit.getName(), previousStock, payload.reservationCode());
+            return AvailabilityOutcome.NEVER_RESERVED;
+        }
         if (units.releaseOneIfNotFull(unit.getId(), now) == 0) {
-            // La unidad ya tiene todos sus cupos libres: no hay nada que devolver. Pasa de verdad
-            // cuando se cancela una reserva que nunca se confirmó (CREADA → CANCELADA) y por lo
-            // tanto nunca consumió stock. No es un error —el tope de TOTAL_STOCK es justo lo que
-            // impide inventar disponibilidad— así que se confirma el mensaje y queda el WARN.
+            // La unidad ya tiene todos sus cupos libres: no hay nada que devolver. Con el filtro
+            // de arriba no debería pasar, salvo que el stock se haya corregido a mano. No es un
+            // error —el tope de TOTAL_STOCK es justo lo que impide inventar disponibilidad— así
+            // que se confirma el mensaje y queda el WARN.
             log.warn("Cancelación sin cupo que devolver: la unidad {} ({}) ya tiene sus {} cupos "
-                            + "libres · reserva={}. Lo normal es una reserva cancelada sin haber "
-                            + "estado confirmada", unit.getId(), unit.getName(),
-                    unit.getTotalStock(), payload.reservationCode());
+                            + "libres · reserva={} (estado anterior {})", unit.getId(),
+                    unit.getName(), unit.getTotalStock(), payload.reservationCode(),
+                    payload.previousStatus());
             return AvailabilityOutcome.RELEASE_SKIPPED;
         }
         log.info("Disponibilidad liberada: unidad={} ({}) {} -> {} cupos · reserva={}",

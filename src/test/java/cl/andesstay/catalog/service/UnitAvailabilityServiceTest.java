@@ -39,6 +39,8 @@ import org.springframework.test.context.ActiveProfiles;
  *   <li>sin disponibilidad: error no recuperable (el consumidor lo manda a la DLQ) y el stock
  *       NO queda negativo;</li>
  *   <li>cancelar una unidad que ya está full no se pasa de {@code totalStock};</li>
+ *   <li>cancelar una reserva que nunca se confirmó no devuelve cupo, y cancelarla después de
+ *       confirmada sí;</li>
  *   <li>unidad inexistente y tipo de evento que no mueve stock: también a la DLQ.</li>
  * </ol>
  */
@@ -160,12 +162,39 @@ class UnitAvailabilityServiceTest {
         AvailabilityOutcome outcome =
                 service.apply(event("evt-cancelado-sin-efecto", CANCELLED, full.getId()));
 
-        // Es el caso normal de una reserva cancelada que nunca se confirmó: se confirma el
-        // mensaje (no es un error) pero la disponibilidad no se infla.
+        // Una reserva confirmada que se cancela sobre una unidad sin cupos ocupados (por ejemplo,
+        // porque el stock se corrigió a mano): se confirma el mensaje (no es un error) pero la
+        // disponibilidad no se infla.
         assertThat(outcome).isEqualTo(AvailabilityOutcome.RELEASE_SKIPPED);
         Unit reloaded = units.findById(full.getId()).orElseThrow();
         assertThat(reloaded.getAvailableStock()).isEqualTo(reloaded.getTotalStock());
         assertThat(processedEvents.findById("evt-cancelado-sin-efecto")).isPresent();
+    }
+
+    @Test
+    @DisplayName("Cancelar una reserva que nunca se confirmó (CREADA → CANCELADA) no devuelve cupo")
+    void cancelledWithoutConfirmationDoesNotReleaseAvailability() {
+        // La unidad tiene 5 cupos y 3 libres: los 2 ocupados son de OTRAS reservas confirmadas.
+        // Antes, el tope de totalStock no frenaba este caso y la unidad quedaba con 4 libres.
+        AvailabilityOutcome outcome = service.apply(event("evt-cancelada-sin-confirmar",
+                CANCELLED, unitId, "CANCELADA", "CREADA"));
+
+        assertThat(outcome).isEqualTo(AvailabilityOutcome.NEVER_RESERVED);
+        assertThat(stock()).isEqualTo(3);
+        // Queda registrado como procesado: un reenvío no lo vuelve a evaluar.
+        Optional<ProcessedEvent> processed = processedEvents.findById("evt-cancelada-sin-confirmar");
+        assertThat(processed).isPresent();
+        assertThat(processed.get().getOutcome()).isEqualTo("NEVER_RESERVED");
+    }
+
+    @Test
+    @DisplayName("Cancelar una reserva que ya pasó por el check-in pendiente sí devuelve el cupo")
+    void cancelledAfterConfirmationReleasesAvailability() {
+        AvailabilityOutcome outcome = service.apply(event("evt-cancelada-checkin-pendiente",
+                CANCELLED, unitId, "CANCELADA", "CHECKIN_PENDIENTE"));
+
+        assertThat(outcome).isEqualTo(AvailabilityOutcome.RELEASED);
+        assertThat(stock()).isEqualTo(4);
     }
 
     @Test
@@ -197,10 +226,21 @@ class UnitAvailabilityServiceTest {
         return units.findById(unitId).orElseThrow().getAvailableStock();
     }
 
-    /** Envelope del contrato de la EP3 con el payload completo del evento de reserva. */
+    /**
+     * Envelope del contrato de la EP3 con el payload completo del evento de reserva. El estado
+     * anterior es el habitual de cada tipo: CREADA → CONFIRMADA al confirmar y
+     * CONFIRMADA → CANCELADA al cancelar (una reserva que sí había descontado cupo).
+     */
     private ReservationEventEnvelope event(String eventId, String type, Long unitId) {
+        return CANCELLED.equals(type)
+                ? event(eventId, type, unitId, "CANCELADA", "CONFIRMADA")
+                : event(eventId, type, unitId, "CONFIRMADA", "CREADA");
+    }
+
+    private ReservationEventEnvelope event(String eventId, String type, Long unitId,
+                                           String status, String previousStatus) {
         ReservationEventPayload payload = new ReservationEventPayload("RSV-000002", unitId,
-                "Cabana Rio Espolon", "ia.reyes@duocuc.cl", "Ian Reyes", "CONFIRMADA", "CREADA",
+                "Cabana Rio Espolon", "ia.reyes@duocuc.cl", "Ian Reyes", status, previousStatus,
                 LocalDate.of(2026, 9, 20), LocalDate.of(2026, 9, 22), 2,
                 new BigDecimal("236000"), Instant.parse("2026-10-17T20:15:30Z"));
         return new ReservationEventEnvelope(type, eventId,

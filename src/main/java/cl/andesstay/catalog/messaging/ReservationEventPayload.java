@@ -33,7 +33,8 @@ import java.time.LocalDate;
  * @param guestEmail      correo del huésped; NO se persiste
  * @param guestName       nombre del huésped; NO se persiste
  * @param status          estado nuevo de la reserva (informativo: el efecto lo decide el type)
- * @param previousStatus  estado anterior, informativo para los logs
+ * @param previousStatus  estado anterior: si es {@code CREADA}, la cancelación no devuelve cupo
+ *                        porque la reserva nunca lo descontó
  * @param checkIn         fecha de llegada
  * @param checkOut        fecha de salida
  * @param nights          noches de la estadía
