@@ -13,8 +13,9 @@ RUN mvn -B -q clean package -DskipTests
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Usuario sin privilegios: nada corre como root.
-RUN addgroup -S andesstay && adduser -S andesstay -G andesstay
+# Usuario sin privilegios: nada corre como root. UID/GID fijos (10001) porque en AWS el
+# wallet de Oracle se monta de solo lectura y pertenece exactamente a ese UID.
+RUN addgroup -S -g 10001 andesstay && adduser -S -u 10001 -G andesstay andesstay
 
 COPY --chown=andesstay:andesstay --from=build /build/target/*.jar /app/app.jar
 
