@@ -49,6 +49,12 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-amqp</artifactId>
     </dependency>
+    <!-- Stream de eventos (EP5): este servicio consume reservations.events en el
+         grupo catalog-consumer. La version la fija el BOM de Spring Boot. -->
+    <dependency>
+      <groupId>org.springframework.kafka</groupId>
+      <artifactId>spring-kafka</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>org.springdoc</groupId>

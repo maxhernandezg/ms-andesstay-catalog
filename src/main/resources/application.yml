@@ -21,6 +21,13 @@ spring:
   # el stack de Compose y run-local.sh exportan SPRING_RABBITMQ_* (que Spring Boot lee
   # solo y PISA este archivo), y el contrato del equipo usa RABBITMQ_*. Los defaults de
   # aca son los de desarrollo local.
+  # Conexion al cluster de Kafka (infra/kafka/compose.yml). El default apunta a los DOS
+  # brokers por sus puertos publicados al host: si uno esta caido, el cliente pide los
+  # metadatos al otro y sigue leyendo. Dentro de Docker se exporta
+  # SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka1:9092,kafka2:9092.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092,localhost:19093}
+
   rabbitmq:
     host: ${RABBITMQ_HOST:localhost}
     port: ${RABBITMQ_PORT:5672}
@@ -89,6 +96,26 @@ andesstay:
       reservation-confirmed: reservation.confirmed   # descuenta un cupo
       reservation-cancelled: reservation.cancelled   # devuelve un cupo
       catalog-dead: catalog.dead                     # binding de la DLQ con events.dead.dlx
+
+  # --------------------------------------------------------------------------
+  #  STREAM DE EVENTOS DE LA EP5 (configuracion centralizada)
+  #
+  #  Desde la EP5 los eventos llegan por Kafka. Ojo con una diferencia real del
+  #  modelo: un topico NO tiene routing keys, asi que el grupo catalog-consumer
+  #  recibe los CINCO eventos de reserva y es el consumidor el que descarta los
+  #  que no mueven el calendario de la unidad (ver
+  #  AvailabilityEventStreamListener). En RabbitMQ ese filtro lo hacia el
+  #  binding de q.evt.catalog.
+  # --------------------------------------------------------------------------
+  kafka:
+    enabled: ${ANDESSTAY_KAFKA_ENABLED:true}
+    consumer-group: ${ANDESSTAY_KAFKA_GROUP:catalog-consumer}
+    client-id: ${ANDESSTAY_KAFKA_CLIENT_ID:ms-andesstay-catalog}
+    concurrency: ${ANDESSTAY_KAFKA_CONCURRENCY:3}
+    max-attempts: ${ANDESSTAY_KAFKA_MAX_ATTEMPTS:3}
+    retry-backoff-ms: ${ANDESSTAY_KAFKA_RETRY_BACKOFF_MS:1000}
+    topics:
+      reservation-events: reservations.events
 
 management:
   health:
