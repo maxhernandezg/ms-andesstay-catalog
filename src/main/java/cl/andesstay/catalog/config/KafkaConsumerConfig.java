@@ -10,6 +10,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
@@ -128,8 +129,20 @@ public class KafkaConsumerConfig {
             KafkaTemplate<String, byte[]> deadLetterKafkaTemplate,
             AndesStayKafkaProperties props) {
 
+        // El destino de la DLT va EXPLICITO a proposito. El resolvedor por defecto de
+        // Spring Kafka publica en "<topico>-dlt" (guion, minusculas), y los topicos del
+        // contrato -los que crea infra/kafka/topics.sh- son "<topico>.DLT". Con la
+        // auto-creacion de topicos apagada, el recoverer no encontraba su destino,
+        // respondia UNKNOWN_TOPIC_OR_PARTITION en bucle y el registro nunca se recuperaba:
+        // UN solo mensaje mal formado dejaba la particion trancada para siempre.
+        //
+        // La particion destino va en -1 a proposito: la elige el productor por la clave.
+        // Fijarla a la de origen obligaria a que la DLT tenga siempre al menos tantas
+        // particiones como el topico original.
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
-                deadLetterKafkaTemplate);
+                deadLetterKafkaTemplate,
+                (registro, excepcion) ->
+                        new TopicPartition(registro.topic() + ".DLT", -1));
 
         // max-attempts son los intentos TOTALES, así que los reintentos son uno menos.
         // Backoff EXPONENCIAL y no fijo: si mil registros fallan por la misma base de datos
