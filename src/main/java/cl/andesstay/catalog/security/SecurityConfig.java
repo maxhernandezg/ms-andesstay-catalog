@@ -114,7 +114,20 @@ public class SecurityConfig {
         // Se construye a mano (en vez de JwtAuthenticationConverter) porque el nombre del
         // principal sigue el orden preferred_username -> upn -> email -> sub del contrato,
         // y eso no se expresa con un unico principalClaimName.
-        return jwt -> new JwtAuthenticationToken(jwt, extractAuthorities(jwt), AuthenticatedUser.usernameOf(jwt));
+        //
+        // Va como clase anonima y NO como lambda a proposito. Spring Kafka, al procesar los
+        // @KafkaListener, recoge todos los beans Converter del contexto para su propio servicio
+        // de conversion, y de un lambda no puede deducir <S> y <T> porque los genericos se
+        // borran en compilacion: el contexto no levanta y falla con "Unable to determine source
+        // type <S> and target type <T> for your Converter". Una clase anonima conserva la
+        // interfaz parametrizada y el problema desaparece.
+        return new Converter<Jwt, AbstractAuthenticationToken>() {
+            @Override
+            public AbstractAuthenticationToken convert(Jwt jwt) {
+                return new JwtAuthenticationToken(jwt, extractAuthorities(jwt),
+                        AuthenticatedUser.usernameOf(jwt));
+            }
+        };
     }
 
     static Collection<GrantedAuthority> extractAuthorities(Jwt jwt) {
