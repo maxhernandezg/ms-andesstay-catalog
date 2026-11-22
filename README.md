@@ -151,12 +151,19 @@ Los tres validadores se combinan en un `DelegatingOAuth2TokenValidator`.
 
 ### Por qué el decoder es perezoso
 
-`JwtDecoders.fromIssuerLocation(...)` sale a Internet apenas se crea el bean. Si alguien
+`NimbusJwtDecoder.withIssuerLocation(...).build()` sale a Internet (documento OpenID y JWKS)
+apenas se construye el decoder. Si alguien
 clona el repo con el placeholder `6f522bef-27e2-4548-89e6-c1717b61ae20` (o sin red), eso tumbaría el contexto de
 Spring y el servicio ni siquiera arrancaría. Por eso hay un `LazyJwtDecoder`: envuelve un
 `Supplier<JwtDecoder>` memoizado y sólo resuelve el issuer cuando llega el primer token.
 Resultado: la app **siempre** levanta, y si el tenant está mal configurado el error se
 traduce en un `401` limpio en vez de un fallo de arranque.
+
+Ese `401` depende del tipo de excepción: el decoder lanza `BadJwtException`, que Spring
+Security convierte en `InvalidBearerTokenException` y responde con el entry point del
+contrato (ruta original en `path`). Una `JwtException` a secas se convertiría en
+`AuthenticationServiceException`, se relanzaría hasta Tomcat y el cliente vería un `401`
+con `"path": "/error"` y un stack trace en el log por cada petición.
 
 ### Formato de error
 

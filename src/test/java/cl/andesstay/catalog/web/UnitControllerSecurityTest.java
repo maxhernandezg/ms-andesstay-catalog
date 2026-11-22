@@ -1,5 +1,7 @@
 package cl.andesstay.catalog.web;
 
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -10,6 +12,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import cl.andesstay.catalog.domain.Unit;
 import cl.andesstay.catalog.domain.UnitType;
 import cl.andesstay.catalog.repository.UnitRepository;
+import cl.andesstay.catalog.security.LazyJwtDecoder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.Map;
@@ -18,6 +21,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
@@ -62,6 +66,28 @@ class UnitControllerSecurityTest {
     @DisplayName("401 sin token en GET /api/catalog/units")
     void listWithoutTokenReturns401() throws Exception {
         mockMvc.perform(get("/api/catalog/units"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(header().string("WWW-Authenticate", "Bearer error=\"invalid_token\""))
+                .andExpect(jsonPath("$.status").value(401))
+                .andExpect(jsonPath("$.path").value("/api/catalog/units"));
+    }
+
+    @Test
+    @DisplayName("401 con la ruta original si el issuer de Azure AD no se puede resolver")
+    void unresolvableIssuerReturns401WithOriginalPath() throws Exception {
+        // El mock delega en un LazyJwtDecoder real cuyo supplier revienta como lo haria
+        // NimbusJwtDecoder.withIssuerLocation(...).build() sin red o con el tenant placeholder.
+        // Con una JwtException a secas Spring Security relanzaba una AuthenticationServiceException
+        // (MockMvc la propaga; Tomcat hace forward a /error); con BadJwtException responde el
+        // entry point del contrato.
+        LazyJwtDecoder sinIssuer = new LazyJwtDecoder(() -> {
+            throw new IllegalStateException("Unable to resolve the Configuration with the provided Issuer");
+        });
+        when(jwtDecoder.decode(anyString()))
+                .thenAnswer(invocation -> sinIssuer.decode(invocation.getArgument(0)));
+
+        mockMvc.perform(get("/api/catalog/units")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer token-cualquiera"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(header().string("WWW-Authenticate", "Bearer error=\"invalid_token\""))
                 .andExpect(jsonPath("$.status").value(401))
