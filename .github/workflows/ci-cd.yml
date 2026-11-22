@@ -82,7 +82,8 @@ jobs:
 
       - name: Aviso (despliegue apagado)
         if: github.event_name != 'pull_request' && vars.AWS_DEPLOY != 'true'
-        run: echo "::notice title=Sin despliegue::AWS_DEPLOY no vale 'true' (Learner Lab apagado): la imagen se construyó, pero no se publicó en ECR ni se desplegó."
+        run: |
+          echo "::notice title=Sin despliegue::AWS_DEPLOY no vale 'true' (Learner Lab apagado): la imagen se construyó, pero no se publicó en ECR ni se desplegó."
 
       - name: Credenciales de AWS (Learner Lab)
         if: github.event_name != 'pull_request' && vars.AWS_DEPLOY == 'true'
