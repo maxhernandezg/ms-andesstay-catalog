@@ -18,6 +18,11 @@
 #  y construye la imagen sin publicarla, y el despliegue se salta con un aviso.
 #    al encender el lab: renovar los tres secretos y gh variable set AWS_DEPLOY --body true
 #    al apagarlo:        gh variable set AWS_DEPLOY --body false
+#
+#  Docker Hub es aparte y no depende del lab: en cada push a main la imagen se
+#  publica como maxhernandezg/andesstay-catalog (latest y el sha), para amd64 y
+#  arm64, siempre que el repo tenga el secreto DOCKERHUB_TOKEN. Sin el secreto
+#  esos pasos se saltan. La usa el compose del repo andesstay-docker.
 # ============================================================================
 name: CI/CD
 
@@ -40,6 +45,8 @@ env:
   AWS_REGION: us-west-2
   SERVICE: catalog                    # servicio en infra/aws/ep3/hosts/apps/compose.yml
   ECR_REPOSITORY: andesstay/catalog
+  DOCKERHUB_USER: maxhernandezg
+  DOCKERHUB_IMAGE: andesstay-catalog
   DEPLOY_HOST: apps                   # EC2 con tag Name=andesstay-ep3-apps
   SMOKE_URL: https://kxsf0h77o2.execute-api.us-west-2.amazonaws.com/actuator/health
 
@@ -63,9 +70,14 @@ jobs:
     name: Imagen Docker
     needs: test
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_LISTO: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: QEMU (para la imagen arm64 de Docker Hub)
+        if: github.event_name != 'pull_request' && env.DOCKERHUB_LISTO == 'true'
+        uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       # En un PR, o con AWS_DEPLOY apagado, solo se comprueba que el Dockerfile
@@ -85,6 +97,27 @@ jobs:
         run: |
           echo "::notice title=Sin despliegue::AWS_DEPLOY no vale 'true' (Learner Lab apagado): la imagen se construyó, pero no se publicó en ECR ni se desplegó."
 
+      - name: Login en Docker Hub
+        if: github.event_name != 'pull_request' && env.DOCKERHUB_LISTO == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # La compilación (Maven o npm) corre en la plataforma del runner gracias a
+      # FROM --platform=$BUILDPLATFORM en el Dockerfile; por emulación solo se arma
+      # la etapa final, que es una JRE o un nginx. Sin build-args: la imagen pública
+      # es la de localhost (front en 4200, BFF en 8080), no la de AWS.
+      - name: Publicar en Docker Hub
+        if: github.event_name != 'pull_request' && env.DOCKERHUB_LISTO == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.DOCKERHUB_USER }}/${{ env.DOCKERHUB_IMAGE }}:latest
+            ${{ env.DOCKERHUB_USER }}/${{ env.DOCKERHUB_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
       - name: Credenciales de AWS (Learner Lab)
         if: github.event_name != 'pull_request' && vars.AWS_DEPLOY == 'true'
         uses: aws-actions/configure-aws-credentials@v4

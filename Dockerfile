@@ -1,5 +1,5 @@
 # ---- Etapa 1: compilacion ----
-FROM maven:3.9-eclipse-temurin-21 AS build
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /build
 
 # Primero el pom para aprovechar la cache de capas de Docker con las dependencias.
