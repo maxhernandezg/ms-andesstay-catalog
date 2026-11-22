@@ -3,8 +3,8 @@ package cl.andesstay.catalog.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Configuración centralizada del consumidor del stream: tópico, consumer group y política de
- * reintentos.
+ * Configuración centralizada del consumidor del stream: tópico, dead letter topic, consumer
+ * group y política de reintentos.
  *
  * <p>Mismo criterio que {@link AndesStayRabbitProperties}: <strong>ningún nombre de tópico ni de
  * grupo se escribe a mano en una clase Java</strong>. Viven en {@code application.yml} bajo
@@ -34,10 +34,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *                      vez conservando el orden dentro de cada una. Más hilos que particiones
  *                      deja hilos ociosos: Kafka nunca asigna dos consumidores del mismo grupo
  *                      a la misma partición
- * @param maxAttempts   intentos totales antes de mandar el registro a la DLT (el contrato usa 3,
- *                      igual que en RabbitMQ)
+ * @param maxAttempts   intentos totales antes de mandar el registro a la DLT de este servicio
+ *                      (el contrato usa 3, igual que en RabbitMQ)
  * @param retryBackoffMs espera entre intentos, en milisegundos
- * @param topics        nombres de los tópicos
+ * @param topics        nombres de los tópicos: el que se consume y la DLT de este servicio
  */
 @ConfigurationProperties(prefix = "andesstay.kafka")
 public record AndesStayKafkaProperties(
@@ -51,7 +51,20 @@ public record AndesStayKafkaProperties(
 
     /**
      * @param reservationEvents tópico de los hechos de reserva (3 particiones, 7 días)
+     * @param deadLetter        DLT <strong>propia</strong> de este servicio,
+     *                          {@code reservations.events.catalog.DLT}: la regla del contrato es
+     *                          {@code <tópico de origen>.<servicio>.DLT}. Es una por consumidor y
+     *                          no una compartida porque varios grupos leen el mismo
+     *                          {@code reservations.events}: con una sola DLT, un registro que
+     *                          falló solo en el catálogo no se distingue de uno que falló en
+     *                          reportería, reinyectarlo se lo vuelve a entregar a todos los
+     *                          grupos (y a los que ya lo habían aplicado bien) y el tamaño de la
+     *                          DLT deja de decir qué servicio está enfermo. El nombre se
+     *                          configura explícito y no se deriva del consumer group porque un
+     *                          destino que no existe en el clúster —con la auto-creación de
+     *                          tópicos apagada— deja la partición trancada para siempre (ver
+     *                          {@link KafkaConsumerConfig})
      */
-    public record Topics(String reservationEvents) {
+    public record Topics(String reservationEvents, String deadLetter) {
     }
 }

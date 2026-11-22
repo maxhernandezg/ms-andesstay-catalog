@@ -65,7 +65,20 @@ import org.springframework.kafka.support.ExponentialBackOffWithMaxRetries;
  * partición se leen en orden y el offset avanza de a uno, así que un evento envenenado que se
  * reintenta para siempre <em>bloquea su partición completa</em> y ningún evento posterior de esa
  * reserva se procesa jamás. El {@link DeadLetterPublishingRecoverer} lo saca del camino
- * publicándolo en {@code <tópico>.DLT} con las cabeceras del error, y el consumidor sigue.</p>
+ * publicándolo en la DLT de este servicio ({@code andesstay.kafka.topics.dead-letter}, por
+ * defecto {@code reservations.events.catalog.DLT}) con las cabeceras del error, y el consumidor
+ * sigue.</p>
+ *
+ * <p><strong>Por qué una DLT por consumidor y no una compartida.</strong> El mismo
+ * {@code reservations.events} lo leen varios grupos: reportería, catálogo y notificaciones,
+ * entre otros, cada uno con el suyo. Si todos descartaran en un único
+ * {@code reservations.events.DLT}, un registro que falló solo acá no se distinguiría de uno que
+ * falló en reportería; reinyectarlo al tópico de origen se lo volvería a entregar a todos los
+ * grupos, incluidos los que ya lo habían aplicado bien; y el tamaño de esa DLT no diría qué
+ * servicio está enfermo. Con la regla del contrato,
+ * {@code <tópico de origen>.<servicio>.DLT}, cada servicio es dueño de sus descartes: los
+ * revisa y los reprocesa sin tocar a nadie, y lo que se acumula en su DLT es una señal de salud
+ * de ESE servicio.</p>
  *
  * <h2>3. Por qué el offset se confirma registro a registro</h2>
  * <p>{@link AckMode#RECORD} confirma el offset después de cada registro procesado con éxito. El
@@ -121,30 +134,40 @@ public class KafkaConsumerConfig {
     }
 
     /**
-     * Política de errores del contrato: reintentos para lo recuperable, DLT para todo lo que no
-     * se pudo procesar.
+     * Política de errores del contrato: reintentos para lo recuperable y la DLT de este servicio
+     * para todo lo que no se pudo procesar.
      */
     @Bean
     public DefaultErrorHandler reservationErrorHandler(
             KafkaTemplate<String, byte[]> deadLetterKafkaTemplate,
             AndesStayKafkaProperties props) {
 
-        // El destino de la DLT va EXPLICITO a proposito. El resolvedor por defecto de
-        // Spring Kafka publica en "<topico>-dlt" (guion, minusculas), y los topicos del
-        // contrato -los que crea infra/kafka/topics.sh- son "<topico>.DLT". Con la
-        // auto-creacion de topicos apagada, el recoverer no encontraba su destino,
+        // El destino de la DLT va EXPLICITO a proposito y sale del yml
+        // (andesstay.kafka.topics.dead-letter). El resolvedor por defecto de Spring Kafka
+        // publica en "<topico>-dlt" (guion, minusculas), un topico que el contrato no crea.
+        // Con la auto-creacion de topicos apagada, el recoverer no encontraba su destino,
         // respondia UNKNOWN_TOPIC_OR_PARTITION en bucle y el registro nunca se recuperaba:
         // UN solo mensaje mal formado dejaba la particion trancada para siempre.
+        //
+        // Y es la DLT de ESTE servicio (reservations.events.catalog.DLT), no una compartida
+        // con los otros grupos que leen reservations.events: ver el punto 2 del javadoc.
+        // Por eso tampoco se arma con registro.topic(): el nombre del topico de origen no
+        // dice quien fallo.
         //
         // La particion destino va en -1 a proposito: la elige el productor por la clave.
         // Fijarla a la de origen obligaria a que la DLT tenga siempre al menos tantas
         // particiones como el topico original.
+        String deadLetterTopic = props.topics() == null ? null : props.topics().deadLetter();
+        if (deadLetterTopic == null || deadLetterTopic.isBlank()) {
+            // Mejor no arrancar que arrancar con un destino imposible: el primer registro que
+            // fallara dejaria su particion detenida sin que nada lo avise hasta mirar el lag.
+            throw new IllegalStateException("andesstay.kafka.topics.dead-letter está vacío: "
+                    + "sin DLT, un registro que no se puede procesar trancaría su partición");
+        }
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
                 deadLetterKafkaTemplate,
-                (registro, excepcion) ->
-                        new TopicPartition(registro.topic() + ".DLT", -1));
+                (registro, excepcion) -> new TopicPartition(deadLetterTopic, -1));
 
-        // max-attempts son los intentos TOTALES, así que los reintentos son uno menos.
         // Backoff EXPONENCIAL y no fijo: si mil registros fallan por la misma base de datos
         // caída, reintentarlos todos cada segundo es un DDoS contra el propio sistema. Subiendo
         // la espera (1s, 2s, 4s…) se le da tiempo real al servicio externo a recuperarse.
@@ -163,10 +186,13 @@ public class KafkaConsumerConfig {
         handler.addNotRetryableExceptions(InvalidEventException.class,
                 NonRecoverableEventException.class);
         handler.setLogLevel(org.springframework.kafka.KafkaException.Level.ERROR);
+        // Spring avisa CADA intento fallido, también el último y el de un error no recuperable
+        // que va derecho a la DLT. Por eso el log dice "intento N fallido" y no "reintento N":
+        // un JSON mal formado no se reintenta nunca, pero su único intento sí falló.
         handler.setRetryListeners((record, ex, intento) ->
-                log.warn("Reintento {} del registro {}-{} offset {} (reserva={}): {}", intento,
-                        record.topic(), record.partition(), record.offset(), record.key(),
-                        ex.toString()));
+                log.warn("Intento {} fallido del registro {}-{} offset {} (reserva={}): {}",
+                        intento, record.topic(), record.partition(), record.offset(),
+                        record.key(), ex.toString()));
         return handler;
     }
 
