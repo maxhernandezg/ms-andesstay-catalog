@@ -6,12 +6,15 @@ Microservicio de **catálogo de unidades y disponibilidad** de AndesStay
 Acá vive el inventario de la red: habitaciones, cabañas y lodges de los 20 recintos,
 con su tarifa por noche, capacidad, stock total y stock disponible. Desde la EP3 también
 **descuenta la disponibilidad cuando una reserva se confirma y la libera cuando se cancela**,
-escuchando los eventos de RabbitMQ: `ms-andesstay-reservations` no llama a este servicio
-(ver [§5](#5-disponibilidad-y-mensajería-ep3)).
+escuchando los eventos de reserva (por Kafka desde la EP5, con RabbitMQ de respaldo):
+`ms-andesstay-reservations` no llama a este servicio (ver
+[§5](#5-disponibilidad-y-mensajería-ep3)).
 
 - **Puerto:** `8082`
 - **Base del API:** `/api/catalog/units`
-- **Cola que consume:** `q.evt.catalog` (`reservation.confirmed` y `reservation.cancelled`)
+- **Tópico que consume:** `reservations.events`, grupo `catalog-consumer`, DLT propia
+  `reservations.events.catalog.DLT`
+- **Cola que consume (respaldo):** `q.evt.catalog` (`reservation.confirmed` y `reservation.cancelled`)
 - **Java 21 + Spring Boot 3.5.16** (resource server OAuth2 contra Azure AD / Entra ID)
 - **Base de datos:** H2 en memoria (perfil `dev`) u Oracle Autonomous Database (perfil `oracle`)
 
@@ -79,12 +82,16 @@ docker run --rm -p 8082:8082 \
   -e AZURE_TENANT_ID=6f522bef-27e2-4548-89e6-c1717b61ae20 \
   -e AZURE_API_CLIENT_ID=7d348e57-2f83-4648-baf0-588cbacccc3c \
   -e ANDESSTAY_RABBIT_ENABLED=false \
+  -e ANDESSTAY_KAFKA_ENABLED=false \
   andesstay/ms-catalog:1.0.0
 ```
 
-Sin broker a la vista conviene partir con `ANDESSTAY_RABBIT_ENABLED=false`: el CRUD queda
-igual y no se llena el log de reintentos de conexión. Con el stack de `infra/apps` esa variable
-no va, porque ahí sí hay broker (`rabbit1`).
+Sin brokers a la vista conviene partir con `ANDESSTAY_RABBIT_ENABLED=false` y
+`ANDESSTAY_KAFKA_ENABLED=false`: el CRUD queda igual y no se llena el log de reintentos de
+conexión. Ojo que dentro del contenedor `localhost:19092` es el contenedor mismo, así que sin la
+segunda variable el consumidor de Kafka reintenta para siempre contra un broker que no está. Con
+el stack de `infra/apps` esas variables no van, porque ahí sí hay brokers (`rabbit1` y, en la
+misma red `andesstay-net`, `kafka1`..`kafka3`).
 
 La imagen es multi-stage (build con `maven:3.9-eclipse-temurin-21`, runtime con
 `eclipse-temurin:21-jre-alpine`), corre con el usuario no root `andesstay` y trae
@@ -110,9 +117,14 @@ reiniciarlo (los eventos esperan en la cola).
 | `RABBITMQ_VHOST` | `/` | vhost del broker |
 | `RABBITMQ_MAX_ATTEMPTS` | `3` | Intentos antes de mandar un mensaje a la DLQ (header `x-attempt`) |
 | `ANDESSTAY_RABBIT_ENABLED` | `true` | En `false` el `@RabbitListener` no arranca **y se apaga el indicador de salud de RabbitMQ**: el catálogo funciona sin broker y `/actuator/health` sigue respondiendo `200` (es lo que hace `run-local.sh` cuando no detecta broker) |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:19092,localhost:19093,localhost:19094` | Los tres brokers del clúster KRaft por sus puertos publicados al host: con uno caído, el cliente pide los metadatos a otro |
+| `ANDESSTAY_KAFKA_ENABLED` | `true` | En `false` el `@KafkaListener` no arranca y el catálogo sigue con su CRUD y con la cola de RabbitMQ |
+| `ANDESSTAY_KAFKA_DLT_TOPIC` | `reservations.events.catalog.DLT` | DLT propia de este servicio (ver [§5](#desde-la-ep5-el-stream-de-kafka)) |
+| `ANDESSTAY_KAFKA_MAX_ATTEMPTS` | `3` | Intentos totales de un registro antes de mandarlo a la DLT |
 
 Dentro de Compose los nombres son `SPRING_RABBITMQ_HOST`, `_PORT`, `_USERNAME` y `_PASSWORD`,
-que Spring Boot lee solo y **pisan** los de arriba.
+que Spring Boot lee solo y **pisan** los de arriba. Lo mismo `SPRING_KAFKA_BOOTSTRAP_SERVERS`,
+que ahí vale `kafka1:9092,kafka2:9092,kafka3:9092`.
 
 Los valores de Azure quedan como **placeholders literales** a propósito: nadie tiene que
 inventar GUIDs para que el proyecto compile y arranque.
@@ -256,6 +268,37 @@ Ningún nombre de cola, exchange o routing key está escrito en el código: todo
 **solo lo suyo**: `events.topic`, `q.evt.catalog`, `events.dead.dlx` y `q.evt.catalog.dlq`.
 `q.evt.report`, `q.evt.audit` y las colas `q.cmd.*` son de sus propios dueños.
 
+### Desde la EP5: el stream de Kafka
+
+Hoy el camino principal es Kafka. `AvailabilityEventStreamListener` consume
+`reservations.events` y aplica cada evento con el **mismo** `ReservationEventParser`, el
+**mismo** `UnitAvailabilityService` y la misma tabla de idempotencia que el consumidor de
+RabbitMQ. Un tópico no tiene routing keys, así que el grupo recibe los cinco eventos de reserva y
+el listener ignora los que no mueven la disponibilidad (`created`, `checkin`, `checkout`):
+ignorarlos no es fallar, el offset avanza igual.
+
+| Dato | Valor |
+|---|---|
+| Tópico | `reservations.events` (3 particiones, 3 réplicas, 7 días) |
+| Consumer group | `catalog-consumer` |
+| Clases | `AvailabilityEventStreamListener` (el listener) y `KafkaConsumerConfig` (contenedor y errores) |
+| Error no recuperable (JSON inválido, unidad inexistente, sin cupos) | sin reintentos, derecho a la DLT |
+| Error recuperable (base caída, timeout) | hasta 3 intentos con espera exponencial y, agotados, a la DLT |
+| DLT | `reservations.events.catalog.DLT` (`andesstay.kafka.topics.dead-letter`) |
+| Offset | se confirma registro a registro (`AckMode.RECORD`) |
+
+La DLT es **propia del catálogo** (regla `<tópico de origen>.<servicio>.DLT`) y no una
+compartida: el mismo tópico lo leen también reportería y notificaciones, cada uno con su grupo.
+Con una DLT común, un registro que falló solo acá no se distinguiría de uno que falló allá,
+reinyectarlo se lo volvería a entregar a todos los grupos y su tamaño dejaría de decir qué
+servicio está mal. El nombre va escrito en el yml y no se deriva de nada: con la auto-creación
+de tópicos apagada, un destino que no existe deja la partición trancada para siempre.
+
+**RabbitMQ queda de respaldo.** El consumidor de `q.evt.catalog` sigue encendido: si
+`ms-andesstay-reservations` corre con `ANDESSTAY_KAFKA_ENABLED=false`, el hecho vuelve a salir por
+`events.topic` y el catálogo lo aplica por esa cola, igual que en la EP3. Con Kafka encendido,
+reservas no publica en RabbitMQ, así que el mismo hecho no llega por los dos caminos.
+
 ---
 
 ## 6. Ejemplos con curl
@@ -343,13 +386,15 @@ de una unidad, porque es la única explicación de por qué su stock se movió.
 src/main/java/cl/andesstay/catalog/
 ├── config/      OpenApiConfig, DevDataSeeder,
 │                AndesStayRabbitProperties (nombres del contrato de mensajería),
-│                RabbitTopologyConfig (beans Queue/Exchange/Binding)
+│                RabbitTopologyConfig (beans Queue/Exchange/Binding),
+│                AndesStayKafkaProperties (tópico, grupo y DLT del stream),
+│                KafkaConsumerConfig (contenedor, reintentos y DLT)
 ├── domain/      Unit, UnitType, ProcessedEvent
 ├── dto/         UnitRequest, UnitResponse, ApiError
 ├── exception/   NotFoundException, ConflictException
-├── messaging/   AvailabilityEventListener (ACK manual), ReservationEventParser,
-│                ReservationEventEnvelope, ReservationEventPayload,
-│                NonRecoverableEventException, InvalidEventException
+├── messaging/   AvailabilityEventListener (ACK manual), AvailabilityEventStreamListener
+│                (Kafka), ReservationEventParser, ReservationEventEnvelope,
+│                ReservationEventPayload, NonRecoverableEventException, InvalidEventException
 ├── repository/  UnitRepository, ProcessedEventRepository
 ├── security/    SecurityConfig, LazyJwtDecoder, AudienceValidator, ScopeValidator,
 │                AuthenticatedUser, handlers de 401 y 403, AzureAdProperties
@@ -369,7 +414,10 @@ export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home
 ./mvnw -B clean verify
 ```
 
-Son **33 pruebas** y ninguna necesita red ni broker:
+Son **40 pruebas** y ninguna necesita red ni broker. En el perfil `test` los dos consumidores
+quedan apagados (`andesstay.rabbit.enabled` y `andesstay.kafka.enabled` en `false`): con el
+clúster de Kafka arriba en la misma máquina, el contexto de pruebas se uniría al grupo real
+`catalog-consumer` y le robaría los eventos al catálogo de verdad.
 
 | Clase | Qué cubre |
 |---|---|
@@ -377,13 +425,16 @@ Son **33 pruebas** y ninguna necesita red ni broker:
 | `UnitServiceTest` (3) | reglas del CRUD contra H2: `availableStock` por defecto, código duplicado y filtros |
 | `CatalogApplicationTests` (1) | el contexto arranca sin salir a Internet |
 | `RabbitTopologyConfigTest` (5) | la topología declarada es la del contrato, los nombres salen del `application.yml`, los bindings son las dos claves exactas, el ACK es MANUAL y **no** se declaran colas de otros servicios |
-| `UnitAvailabilityServiceTest` (7) | confirmar baja el stock, cancelar lo libera, el mismo `eventId` dos veces lo deja igual, sin cupos no queda negativo, cancelar una unidad full no se pasa de `totalStock`, unidad inexistente y `type` que no mueve stock |
+| `UnitAvailabilityServiceTest` (9) | confirmar baja el stock, cancelar lo libera, el mismo `eventId` dos veces lo deja igual, sin cupos no queda negativo, cancelar una unidad full no se pasa de `totalStock`, cancelar una reserva que nunca se confirmó no devuelve cupo (y una que sí, lo devuelve), unidad inexistente y `type` que no mueve stock |
 | `AvailabilityEventListenerTest` (8) | la política de ACK con el `Channel` de AMQP mockeado: `ack`, `nack` a la DLQ, reintento con `x-attempt + 1`, intentos agotados, republicación imposible (a la DLQ, nunca `requeue=true`) y evento repetido |
+| `KafkaConsumerConfigTest` (4) | la política de errores del stream con el `KafkaTemplate` mockeado: un evento mal formado va sin reintentos a `reservations.events.catalog.DLT` (no a la compartida) con su clave, su cuerpo y las cabeceras del error; un error recuperable se intenta 3 veces en total (2 reintentos) antes de ir a la DLT; el nombre sale de la configuración; y sin nombre de DLT el servicio no arranca |
+| `AndesStayKafkaPropertiesTest` (1) | el `application.yml` trae `reservations.events`, `catalog-consumer` y la DLT propia, y en el perfil `test` el consumidor de Kafka queda apagado |
 
 ---
 
 ## 9. Fuera de alcance
 
-Kafka y Zookeeper: la reportería releíble es materia de la evaluación siguiente
-(ver `infra/kafka/README.md`). Este servicio **no publica** mensajes y no habla con ningún otro
-microservicio por REST: solo consume `q.evt.catalog`.
+Este servicio **no publica** eventos de dominio y no habla con ningún otro microservicio por
+REST: solo consume `reservations.events` y `q.evt.catalog`. Lo único que escribe en un broker es
+lo suyo: los reintentos de `q.evt.catalog` y los descartes que manda a
+`reservations.events.catalog.DLT`.

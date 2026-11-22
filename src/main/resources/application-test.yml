@@ -27,6 +27,14 @@ andesstay:
     required-scope: access_as_user
   rabbit:
     enabled: false
+  # El consumidor de Kafka tambien queda apagado. Con el cluster arriba en la misma
+  # maquina (19092-19094), el contexto de pruebas se unia al grupo REAL catalog-consumer:
+  # habria leido reservations.events contra una H2 vacia, mandado cada confirmacion a la
+  # DLT por "unidad inexistente" y confirmado esos offsets, robandole los eventos al
+  # catalogo de verdad. La politica de errores del stream se prueba sin broker en
+  # KafkaConsumerConfigTest. El nombre de la DLT y los topicos se heredan de application.yml.
+  kafka:
+    enabled: false
 
 management:
   health:

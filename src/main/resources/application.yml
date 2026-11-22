@@ -17,17 +17,17 @@ spring:
           # Issuer de Azure AD (Entra ID). Se resuelve de forma perezosa: ver LazyJwtDecoder.
           issuer-uri: https://login.microsoftonline.com/${AZURE_TENANT_ID:6f522bef-27e2-4548-89e6-c1717b61ae20}/v2.0
 
+  # Conexion al cluster de Kafka (infra/kafka/compose.yml). El default apunta a los TRES
+  # brokers por sus puertos publicados al host: si uno esta caido, el cliente pide los
+  # metadatos a cualquiera de los otros dos y sigue leyendo. Dentro de Docker se exporta
+  # SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka1:9092,kafka2:9092,kafka3:9092.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092,localhost:19093,localhost:19094}
+
   # Conexion AMQP al broker (puerto 5672). Conviven dos juegos de nombres a proposito:
   # el stack de Compose y run-local.sh exportan SPRING_RABBITMQ_* (que Spring Boot lee
   # solo y PISA este archivo), y el contrato del equipo usa RABBITMQ_*. Los defaults de
   # aca son los de desarrollo local.
-  # Conexion al cluster de Kafka (infra/kafka/compose.yml). El default apunta a los DOS
-  # brokers por sus puertos publicados al host: si uno esta caido, el cliente pide los
-  # metadatos al otro y sigue leyendo. Dentro de Docker se exporta
-  # SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka1:9092,kafka2:9092.
-  kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092,localhost:19093}
-
   rabbitmq:
     host: ${RABBITMQ_HOST:localhost}
     port: ${RABBITMQ_PORT:5672}
@@ -116,6 +116,16 @@ andesstay:
     retry-backoff-ms: ${ANDESSTAY_KAFKA_RETRY_BACKOFF_MS:1000}
     topics:
       reservation-events: reservations.events
+      # DLT PROPIA de este servicio. La regla del contrato es
+      # <topico de origen>.<servicio>.DLT: cada consumidor tiene la suya y no una
+      # compartida, porque varios grupos (report, catalog, notify) leen el mismo
+      # reservations.events. Con una DLT comun, un registro que fallo solo aca no se
+      # distingue de uno que fallo en reporteria, reinyectarlo se lo vuelve a entregar
+      # a TODOS los grupos, y el tamano de la DLT deja de decir que servicio esta mal.
+      # El nombre va escrito y no se deriva del consumer group: con la auto-creacion
+      # de topicos apagada, un destino que no existe deja la particion trancada para
+      # siempre (ver KafkaConsumerConfig). El topico lo crea infra/kafka/topics.sh.
+      dead-letter: ${ANDESSTAY_KAFKA_DLT_TOPIC:reservations.events.catalog.DLT}
 
 management:
   health:
